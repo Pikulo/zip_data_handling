@@ -1,25 +1,32 @@
 """
 压缩文件处理器 - 网页版
 支持 RAR、ZIP、7z 格式的文件提取
-部署方式: streamlit run streamlit_app.py
+
+部署方式（本地运行，可访问本地文件夹）:
+    streamlit run streamlit_app.py
+
+云端部署（Streamlit Cloud）:
+    https://share.streamlit.io/ 部署后使用上传/下载功能
 """
 
 import os
 import shutil
-import zipfile
 import py7zr
 import tempfile
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import time
 import streamlit as st
 from pathlib import Path
 
+# 检测运行环境
+def is_cloud_deployment():
+    """检测是否为云端部署"""
+    return not os.path.exists('/mount/src')
+
 # 页面配置
 st.set_page_config(
-    page_title="压缩文件处理器",
+    page_title="📦 压缩文件处理器",
     page_icon="📦",
-    layout="wide",
+    layout="wide" if not is_cloud_deployment() else "centered",
     initial_sidebar_state="expanded"
 )
 
@@ -43,7 +50,7 @@ def should_skip_file(filename, skip_user_files, skip_patterns):
                 return True, pattern
     return False, None
 
-def process_single_file(archive_obj, file_path, output_dir, first_folder, all_content):
+def process_single_file(file_path, output_dir, first_folder, all_content):
     """处理单个文件"""
     try:
         # 计算相对路径
@@ -86,15 +93,8 @@ def process_archive(archive_file, output_dir, max_workers, progress_bar, status_
             tmp_path = tmp_file.name
         
         try:
-            if archive_type == '.rar':
-                # 使用 py7zr 处理 RAR 文件
-                archive_obj = py7zr.SevenZipFile(tmp_path, mode='r')
-            elif archive_type == '.zip':
-                archive_obj = py7zr.SevenZipFile(tmp_path, mode='r')
-            elif archive_type == '.7z':
-                archive_obj = py7zr.SevenZipFile(tmp_path, mode='r')
-            else:
-                return {'error': f'不支持的格式: {archive_type}'}
+            # 使用 py7zr 处理所有格式
+            archive_obj = py7zr.SevenZipFile(tmp_path, mode='r')
             
             # 获取文件列表
             file_list = archive_obj.getnames()
@@ -137,7 +137,7 @@ def process_archive(archive_file, output_dir, max_workers, progress_bar, status_
                 for file_path in files_to_process:
                     future = executor.submit(
                         process_single_file,
-                        archive_obj, file_path, output_dir, first_folder, all_content
+                        file_path, output_dir, first_folder, all_content
                     )
                     futures.append(future)
                 
@@ -175,9 +175,18 @@ def process_archive(archive_file, output_dir, max_workers, progress_bar, status_
         return {'error': str(e)}
 
 def main():
+    # 检测部署环境
+    cloud_mode = is_cloud_deployment()
+    
     # 标题
     st.title("📦 压缩文件处理器")
     st.markdown("支持 RAR、ZIP、7z 格式的文件提取")
+    
+    # 环境提示
+    if cloud_mode:
+        st.info("☁️ **云端模式** - 文件上传后需下载到本地")
+    else:
+        st.success("💻 **本地模式** - 可直接访问本地文件夹")
     
     # 侧边栏 - 设置
     with st.sidebar:
@@ -201,9 +210,26 @@ def main():
         st.markdown("**支持的格式:**")
         for ext, desc in SUPPORTED_FORMATS.items():
             st.markdown(f"- {ext} {desc}")
+        
+        st.markdown("---")
+        st.markdown("**使用说明:**")
+        if cloud_mode:
+            st.markdown("""
+            1. 上传压缩文件
+            2. 点击处理
+            3. 下载 ZIP 到��地
+            4. 解压到目标文件夹
+            """)
+        else:
+            st.markdown("""
+            1. 上传/选择压缩文件
+            2. 选择输出文件夹
+            3. 点击处理
+            4. 文件直接保存到本地
+            """)
     
     # 主界面 - 文件上传
-    st.subheader("1. 上传压缩文件")
+    st.subheader("📤 1. 上传压缩文件")
     uploaded_file = st.file_uploader(
         "拖拽或选择压缩文件",
         type=list(SUPPORTED_FORMATS.keys()),
@@ -218,21 +244,54 @@ def main():
         st.info(f"文件大小: {file_size:.2f} MB")
         
         # 2. 选择输出目录
-        st.subheader("2. 选择输出目录")
+        st.subheader("📁 2. 选择输出目录")
         
-        # 创建临时目录用于处理
-        temp_dir = tempfile.mkdtemp()
-        output_dir = st.text_input(
-            "输出路径",
-            value=temp_dir,
-            help="处理后的文件将保存到此目录"
-        )
+        if cloud_mode:
+            # 云端模式：显示说明
+            st.markdown("""
+            > 💡 **云端部署说明**
+            > 
+            > 由于安全限制，无法直接写入本地文件夹。
+            > 处理完成后请下载 ZIP 文件，然后解压到目标位置。
+            """)
+            output_dir = tempfile.mkdtemp()
+            st.text_input("临时处理目录", value=output_dir, disabled=True)
+        else:
+            # 本地模式：可选择文件夹
+            default_dir = os.path.expanduser("~/Downloads")
+            output_dir = st.text_input(
+                "输出路径",
+                value=default_dir,
+                help="处理后的文件将保存到此目录"
+            )
+            
+            # 添加文件夹选择按钮（支持 Mac/Windows）
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                if st.button("📂 浏览文件夹", use_container_width=True):
+                    try:
+                        # 尝试使用系统文件对话框
+                        import tkinter as tk
+                        from tkinter import filedialog
+                        root = tk.Tk()
+                        root.withdraw()
+                        selected_dir = filedialog.askdirectory(initialdir=output_dir)
+                        root.destroy()
+                        if selected_dir:
+                            st.session_state['output_dir'] = selected_dir
+                    except Exception:
+                        st.info("无法打开文件夹选择器，请手动输入路径")
+            
+            # 显示当前选择的路径
+            if 'output_dir' in st.session_state:
+                output_dir = st.session_state['output_dir']
+                st.text_input("输出路径", value=output_dir, key='output_path')
         
         # 3. 开始处理
-        st.subheader("3. 开始处理")
+        st.subheader("🚀 3. 开始处理")
         
-        if st.button("🚀 开始处理", type="primary", use_container_width=True):
-            if not output_dir:
+        if st.button("开始处理", type="primary", use_container_width=True):
+            if not cloud_mode and not output_dir:
                 st.error("请输入输出目录！")
                 return
             
@@ -242,7 +301,6 @@ def main():
             # 进度条
             progress_bar = st.progress(0)
             status_text = st.empty()
-            result_placeholder = st.empty()
             
             # 在线程中处理（避免阻塞UI）
             def run_processing():
@@ -265,67 +323,63 @@ def main():
                 col2.metric("跳过文件", result['skipped'])
                 col3.metric("错误文件", result['errors'])
                 
-                # 显示输出目录
-                st.markdown(f"**输出目录:** `{result['output_dir']}`")
+                if not cloud_mode:
+                    # 本地模式：显示输出目录
+                    st.markdown(f"**输出目录:** `{result['output_dir']}`")
                 
                 # 列出处理的文件
-                with st.expander("查看处理的文件列表"):
-                    for item in os.listdir(output_dir):
-                        item_path = os.path.join(output_dir, item)
-                        if os.path.isdir(item_path):
-                            st.markdown(f"📁 {item}/")
-                            for sub_item in os.listdir(item_path)[:10]:  # 只显示前10个
-                                st.markdown(f"   - {sub_item}")
-                            if len(os.listdir(item_path)) > 10:
-                                st.markdown(f"   ... 共 {len(os.listdir(item_path))} 个文件")
-                        else:
-                            size = os.path.getsize(item_path) / 1024
-                            st.markdown(f"📄 {item} ({size:.1f} KB)")
+                with st.expander("📋 查看处理的文件列表"):
+                    try:
+                        for item in os.listdir(output_dir):
+                            item_path = os.path.join(output_dir, item)
+                            if os.path.isdir(item_path):
+                                st.markdown(f"📁 {item}/")
+                                sub_items = os.listdir(item_path)[:10]
+                                for sub_item in sub_items:
+                                    st.markdown(f"   - {sub_item}")
+                                if len(os.listdir(item_path)) > 10:
+                                    st.markdown(f"   ... 共 {len(os.listdir(item_path))} 个文件")
+                            else:
+                                size = os.path.getsize(item_path) / 1024
+                                st.markdown(f"📄 {item} ({size:.1f} KB)")
+                    except Exception:
+                        st.markdown("文件列表无法显示")
                 
-                # 下载按钮
-                if os.path.exists(output_dir) and os.listdir(output_dir):
-                    st.subheader("4. 下载结果")
-                    
-                    # 创建 ZIP 下载
-                    zip_path = os.path.join(tempfile.gettempdir(), f"{uploaded_file.name}_extracted.zip")
-                    shutil.make_archive(
-                        zip_path.replace('.zip', ''),
-                        'zip',
-                        output_dir
-                    )
-                    
-                    with open(zip_path, 'rb') as f:
-                        st.download_button(
-                            label="📥 下载所有文件 (ZIP)",
-                            data=f,
-                            file_name=f"{Path(uploaded_file.name).stem}_extracted.zip",
-                            mime="application/zip",
-                            use_container_width=True
+                # 下载按钮（云端模式必需，本地模式可选）
+                if cloud_mode or st.checkbox("生成下载文件", value=cloud_mode):
+                    if os.path.exists(output_dir) and os.listdir(output_dir):
+                        st.subheader("📥 4. 下载结果")
+                        
+                        # 创建 ZIP 下载
+                        zip_base = f"{Path(uploaded_file.name).stem}_extracted"
+                        zip_path = os.path.join(tempfile.gettempdir(), f"{zip_base}.zip")
+                        shutil.make_archive(
+                            zip_path.replace('.zip', ''),
+                            'zip',
+                            output_dir
                         )
-    
-    # 使用说明
-    with st.expander("📖 使用说明"):
-        st.markdown("""
-        ### 使用步骤
-        
-        1. **上传文件**: 点击"选择压缩文件"或直接拖拽文件
-        2. **选择输出**: 默认使用临时目录，可自定义
-        3. **开始处理**: 点击"开始处理"按钮
-        4. **下载结果**: 处理完成后可下载 ZIP 文件
-        
-        ### 功能特点
-        
-        - ✅ 支持 RAR、ZIP、7z 格式
-        - ✅ 多线程并行处理
-        - ✅ 自动过滤不需要的文件
-        - ✅ 一键下载处理结果
-        - ✅ 响应式设计，手机也能用
-        
-        ### 过滤规则
-        
-        - 默认跳过以 `User.`、`temp_` 开头的文件
-        - 可在侧边栏自定义过滤规则
-        """)
+                        
+                        with open(zip_path, 'rb') as f:
+                            st.download_button(
+                                label="📥 下载所有文件 (ZIP)",
+                                data=f,
+                                file_name=f"{zip_base}.zip",
+                                mime="application/zip",
+                                use_container_width=True
+                            )
+                        
+                        st.markdown("""
+                        > 💡 下载后请解压 ZIP 文件到您需要的文件夹
+                        """)
+
+    # 底部说明
+    st.markdown("---")
+    st.markdown("""
+    <div style='text-align: center; color: #888; font-size: 0.9em;'>
+    📦 压缩文件处理器 | 支持 RAR、ZIP、7z 格式<br>
+    本地运行: <code>streamlit run streamlit_app.py</code>
+    </div>
+    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
