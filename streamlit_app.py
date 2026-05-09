@@ -308,7 +308,7 @@ def main():
     st.subheader("📤 上传压缩文件")
     uploaded_file = st.file_uploader(
         "拖拽或选择压缩文件",
-        type=list(SUPPORTED_FORMATS.keys()),
+        type=None,  # 允许所有文件，在应用内检测
         help="支持 ZIP、7z 格式"
     )
     
