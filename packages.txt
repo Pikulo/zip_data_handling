@@ -1,1 +1,2 @@
-unrar
+unrar-free
+libunrar-dev
