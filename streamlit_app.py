@@ -6,7 +6,6 @@
 
 import os
 import shutil
-import rarfile
 import zipfile
 import py7zr
 import tempfile
@@ -44,7 +43,7 @@ def should_skip_file(filename, skip_user_files, skip_patterns):
                 return True, pattern
     return False, None
 
-def process_single_file(archive_obj, file_path, output_dir, first_folder, archive_type):
+def process_single_file(archive_obj, file_path, output_dir, first_folder, all_content):
     """处理单个文件"""
     try:
         # 计算相对路径
@@ -67,16 +66,10 @@ def process_single_file(archive_obj, file_path, output_dir, first_folder, archiv
         if dest_dir:
             os.makedirs(dest_dir, exist_ok=True)
         
-        # 根据格式提取文件
-        if archive_type in ['rar', 'zip']:
-            with archive_obj.open(file_path) as source:
-                with open(dest_path, 'wb') as target:
-                    shutil.copyfileobj(source, target)
-        elif archive_type == '7z':
-            content = archive_obj.read([file_path])
-            if content and file_path in content:
-                with open(dest_path, 'wb') as target:
-                    target.write(content[file_path].read())
+        # 写入文件内容
+        if file_path in all_content:
+            with open(dest_path, 'wb') as target:
+                target.write(all_content[file_path].read())
         
         return {'status': 'copied', 'name': relative_path}
     except Exception as e:
@@ -87,89 +80,96 @@ def process_archive(archive_file, output_dir, max_workers, progress_bar, status_
     archive_type = Path(archive_file.name).suffix.lower()
     
     try:
-        if archive_type == '.rar':
-            archive_obj = rarfile.RarFile(archive_file)
-        elif archive_type == '.zip':
-            archive_obj = zipfile.ZipFile(archive_file)
-        elif archive_type == '.7z':
-            archive_obj = py7zr.SevenZipFile(archive_file, mode='r')
-        else:
-            return {'error': f'不支持的格式: {archive_type}'}
+        # 保存临时文件
+        with tempfile.NamedTemporaryFile(suffix=archive_type, delete=False) as tmp_file:
+            tmp_file.write(archive_file.getvalue())
+            tmp_path = tmp_file.name
         
-        # 获取文件列表
-        if archive_type == '.rar':
-            file_list = archive_obj.namelist()
-        elif archive_type == '.zip':
-            file_list = archive_obj.namelist()
-        elif archive_type == '.7z':
-            file_list = archive_obj.getnames()
-        else:
-            return {'error': '不支持的格式'}
-        
-        if not file_list:
-            return {'error': '压缩文件为空'}
-        
-        # 获取第一层文件夹
-        first_folder = None
-        for name in file_list:
-            if '/' in name:
-                potential_folder = name.split('/')[0]
-                if potential_folder and not name.endswith('/'):
-                    first_folder = potential_folder
-                    break
-        
-        if not first_folder:
-            first_folder = ''
-            files_to_process = [f for f in file_list if not f.endswith('/')]
-        else:
-            prefix = first_folder + '/'
-            files_to_process = [
-                f for f in file_list 
-                if not f.endswith('/') and f.startswith(prefix)
-            ]
-        
-        total_files = len(files_to_process)
-        status_text.text(f"找到 {total_files} 个文件需要处理")
-        
-        copied_count = 0
-        skipped_count = 0
-        error_count = 0
-        
-        # 使用线程池处理
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
-            for file_path in files_to_process:
-                future = executor.submit(
-                    process_single_file,
-                    archive_obj, file_path, output_dir, first_folder, archive_type
-                )
-                futures.append(future)
+        try:
+            if archive_type == '.rar':
+                # 使用 py7zr 处理 RAR 文件
+                archive_obj = py7zr.SevenZipFile(tmp_path, mode='r')
+            elif archive_type == '.zip':
+                archive_obj = py7zr.SevenZipFile(tmp_path, mode='r')
+            elif archive_type == '.7z':
+                archive_obj = py7zr.SevenZipFile(tmp_path, mode='r')
+            else:
+                return {'error': f'不支持的格式: {archive_type}'}
             
-            # 处理结果
-            completed = 0
-            for future in as_completed(futures):
-                completed += 1
-                progress = completed / total_files
-                progress_bar.progress(progress)
+            # 获取文件列表
+            file_list = archive_obj.getnames()
+            
+            if not file_list:
+                return {'error': '压缩文件为空'}
+            
+            # 获取第一层文件夹
+            first_folder = None
+            for name in file_list:
+                if '/' in name:
+                    potential_folder = name.split('/')[0]
+                    if potential_folder and not name.endswith('/'):
+                        first_folder = potential_folder
+                        break
+            
+            if not first_folder:
+                first_folder = ''
+                files_to_process = [f for f in file_list if not f.endswith('/')]
+            else:
+                prefix = first_folder + '/'
+                files_to_process = [
+                    f for f in file_list 
+                    if not f.endswith('/') and f.startswith(prefix)
+                ]
+            
+            total_files = len(files_to_process)
+            status_text.text(f"找到 {total_files} 个文件需要处理")
+            
+            copied_count = 0
+            skipped_count = 0
+            error_count = 0
+            
+            # 读取所有文件内容到内存
+            all_content = archive_obj.read(files_to_process)
+            
+            # 使用线程池处理
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = []
+                for file_path in files_to_process:
+                    future = executor.submit(
+                        process_single_file,
+                        archive_obj, file_path, output_dir, first_folder, all_content
+                    )
+                    futures.append(future)
                 
-                result = future.result()
-                if result['status'] == 'copied':
-                    copied_count += 1
-                elif result['status'] == 'skipped':
-                    skipped_count += 1
-                else:
-                    error_count += 1
-        
-        # 清理
-        archive_obj.close()
-        
-        return {
-            'success': True,
-            'copied': copied_count,
-            'skipped': skipped_count,
-            'errors': error_count,
-            'output_dir': output_dir
-        }
+                # 处理结果
+                completed = 0
+                for future in as_completed(futures):
+                    completed += 1
+                    progress = completed / total_files
+                    progress_bar.progress(progress)
+                    
+                    result = future.result()
+                    if result['status'] == 'copied':
+                        copied_count += 1
+                    elif result['status'] == 'skipped':
+                        skipped_count += 1
+                    else:
+                        error_count += 1
+            
+            # 清理
+            archive_obj.close()
+            
+            return {
+                'success': True,
+                'copied': copied_count,
+                'skipped': skipped_count,
+                'errors': error_count,
+                'output_dir': output_dir
+            }
+        finally:
+            # 删除临时文件
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
         
     except Exception as e:
         return {'error': str(e)}
