@@ -18,15 +18,17 @@ import streamlit as st
 from pathlib import Path
 
 # 检测运行环境
-def is_cloud_deployment():
-    """检测是否为云端部署"""
+def is_local_deployment():
+    """检测是否为本地部署（而非 Streamlit Cloud）"""
+    # Streamlit Cloud 环境下 /mount/src 存在但无法访问本地文件系统
+    # 本地环境可以访问任意本地路径
     return not os.path.exists('/mount/src')
 
 # 页面配置
 st.set_page_config(
     page_title="📦 压缩文件处理器",
     page_icon="📦",
-    layout="wide" if not is_cloud_deployment() else "centered",
+    layout="wide" if is_local_deployment() else "centered",
     initial_sidebar_state="expanded"
 )
 
@@ -176,17 +178,17 @@ def process_archive(archive_file, output_dir, max_workers, progress_bar, status_
 
 def main():
     # 检测部署环境
-    cloud_mode = is_cloud_deployment()
+    is_local = is_local_deployment()
     
     # 标题
     st.title("📦 压缩文件处理器")
     st.markdown("支持 RAR、ZIP、7z 格式的文件提取")
     
     # 环境提示
-    if cloud_mode:
-        st.info("☁️ **云端模式** - 文件上传后需下载到本地")
+    if is_local:
+        st.success("💻 **本地模式** - 可直接保存到本地文件夹")
     else:
-        st.success("💻 **本地模式** - 可直接访问本地文件夹")
+        st.info("☁️ **云端模式** - 上传后下载 ZIP 到本地")
     
     # 侧边栏 - 设置
     with st.sidebar:
@@ -213,19 +215,19 @@ def main():
         
         st.markdown("---")
         st.markdown("**使用说明:**")
-        if cloud_mode:
-            st.markdown("""
-            1. 上传压缩文件
-            2. 点击处理
-            3. 下载 ZIP 到��地
-            4. 解压到目标文件夹
-            """)
-        else:
+        if is_local:
             st.markdown("""
             1. 上传/选择压缩文件
             2. 选择输出文件夹
             3. 点击处理
             4. 文件直接保存到本地
+            """)
+        else:
+            st.markdown("""
+            1. 上传压缩文件
+            2. 点击处理
+            3. 下载 ZIP 到本地
+            4. 解压到目标文件夹
             """)
     
     # 主界面 - 文件上传
@@ -246,17 +248,7 @@ def main():
         # 2. 选择输出目录
         st.subheader("📁 2. 选择输出目录")
         
-        if cloud_mode:
-            # 云端模式：显示说明
-            st.markdown("""
-            > 💡 **云端部署说明**
-            > 
-            > 由于安全限制，无法直接写入本地文件夹。
-            > 处理完成后请下载 ZIP 文件，然后解压到目标位置。
-            """)
-            output_dir = tempfile.mkdtemp()
-            st.text_input("临时处理目录", value=output_dir, disabled=True)
-        else:
+        if is_local:
             # 本地模式：可选择文件夹
             default_dir = os.path.expanduser("~/Downloads")
             output_dir = st.text_input(
@@ -265,12 +257,11 @@ def main():
                 help="处理后的文件将保存到此目录"
             )
             
-            # 添加文件夹选择按钮（支持 Mac/Windows）
+            # 添加文件夹选择按钮
             col1, col2 = st.columns([1, 2])
             with col1:
                 if st.button("📂 浏览文件夹", use_container_width=True):
                     try:
-                        # 尝试使用系统文件对话框
                         import tkinter as tk
                         from tkinter import filedialog
                         root = tk.Tk()
@@ -286,12 +277,22 @@ def main():
             if 'output_dir' in st.session_state:
                 output_dir = st.session_state['output_dir']
                 st.text_input("输出路径", value=output_dir, key='output_path')
+        else:
+            # 云端模式：显示说明，无法选择本地文件夹
+            st.markdown("""
+            > 💡 **云端部署说明**
+            > 
+            > 由于安全限制，云端服务器无法直接访问您的本地文件夹。
+            > 处理完成后请下载 ZIP 文件，然后解压到您需要的文件夹。
+            """)
+            output_dir = tempfile.mkdtemp()
+            st.text_input("临时处理目录", value=output_dir, disabled=True, help="云端临时目录，处理完成后需下载")
         
         # 3. 开始处理
         st.subheader("🚀 3. 开始处理")
         
         if st.button("开始处理", type="primary", use_container_width=True):
-            if not cloud_mode and not output_dir:
+            if is_local and not output_dir:
                 st.error("请输入输出目录！")
                 return
             
@@ -323,7 +324,7 @@ def main():
                 col2.metric("跳过文件", result['skipped'])
                 col3.metric("错误文件", result['errors'])
                 
-                if not cloud_mode:
+                if is_local:
                     # 本地模式：显示输出目录
                     st.markdown(f"**输出目录:** `{result['output_dir']}`")
                 
@@ -345,32 +346,34 @@ def main():
                     except Exception:
                         st.markdown("文件列表无法显示")
                 
-                # 下载按钮（云端模式必需，本地模式可选）
-                if cloud_mode or st.checkbox("生成下载文件", value=cloud_mode):
-                    if os.path.exists(output_dir) and os.listdir(output_dir):
-                        st.subheader("📥 4. 下载结果")
-                        
-                        # 创建 ZIP 下载
-                        zip_base = f"{Path(uploaded_file.name).stem}_extracted"
-                        zip_path = os.path.join(tempfile.gettempdir(), f"{zip_base}.zip")
-                        shutil.make_archive(
-                            zip_path.replace('.zip', ''),
-                            'zip',
-                            output_dir
+                # 下载按钮
+                st.subheader("📥 4. 下载结果")
+                
+                if os.path.exists(output_dir) and os.listdir(output_dir):
+                    # 创建 ZIP 下载
+                    zip_base = f"{Path(uploaded_file.name).stem}_extracted"
+                    zip_path = os.path.join(tempfile.gettempdir(), f"{zip_base}.zip")
+                    shutil.make_archive(
+                        zip_path.replace('.zip', ''),
+                        'zip',
+                        output_dir
+                    )
+                    
+                    with open(zip_path, 'rb') as f:
+                        st.download_button(
+                            label="📥 下载所有文件 (ZIP)",
+                            data=f,
+                            file_name=f"{zip_base}.zip",
+                            mime="application/zip",
+                            use_container_width=True
                         )
-                        
-                        with open(zip_path, 'rb') as f:
-                            st.download_button(
-                                label="📥 下载所有文件 (ZIP)",
-                                data=f,
-                                file_name=f"{zip_base}.zip",
-                                mime="application/zip",
-                                use_container_width=True
-                            )
-                        
+                    
+                    if not is_local:
                         st.markdown("""
-                        > 💡 下载后请解压 ZIP 文件到您需要的文件夹
+                        > 💡 请下载 ZIP 文件并解压到您需要的目标文件夹
                         """)
+                else:
+                    st.info("没有文件需要下载")
 
     # 底部说明
     st.markdown("---")
