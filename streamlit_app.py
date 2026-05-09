@@ -6,7 +6,6 @@
 import os
 import shutil
 import zipfile
-import py7zr
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit as st
@@ -40,7 +39,7 @@ def should_skip_file(filename, skip_user_files, skip_patterns):
                 return True, pattern
     return False, None
 
-def process_single_file(file_path, output_dir, first_folder, all_content, skip_user_files, skip_patterns):
+def process_single_file(file_path, output_dir, first_folder, file_content, skip_user_files, skip_patterns):
     """处理单个文件"""
     try:
         # 计算相对路径
@@ -60,13 +59,173 @@ def process_single_file(file_path, output_dir, first_folder, all_content, skip_u
             os.makedirs(dest_dir, exist_ok=True)
         
         # 写入文件内容
-        if file_path in all_content:
-            with open(dest_path, 'wb') as target:
-                target.write(all_content[file_path].read())
+        with open(dest_path, 'wb') as target:
+            target.write(file_content)
         
         return {'status': 'copied', 'name': relative_path}
     except Exception as e:
         return {'status': 'error', 'name': relative_path, 'error': str(e)}
+
+def extract_zip(file_data, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns):
+    """使用 zipfile 提取 ZIP 文件"""
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_file:
+            tmp_file.write(file_data)
+            tmp_path = tmp_file.name
+        
+        try:
+            with zipfile.ZipFile(tmp_path, 'r') as archive:
+                file_list = [info for info in archive.infolist() if not info.is_dir()]
+                
+                if not file_list:
+                    return {'error': '压缩文件为空'}
+                
+                # 获取第一层文件夹
+                first_folder = None
+                for info in file_list:
+                    if '/' in info.filename:
+                        potential_folder = info.filename.split('/')[0]
+                        if potential_folder:
+                            first_folder = potential_folder
+                            break
+                
+                if not first_folder:
+                    first_folder = ''
+                    files_to_process = [info for info in file_list]
+                else:
+                    prefix = first_folder + '/'
+                    files_to_process = [
+                        info for info in file_list 
+                        if info.filename.startswith(prefix)
+                    ]
+                
+                total_files = len(files_to_process)
+                status_text.text(f"找到 {total_files} 个文件需要处理")
+                
+                copied_count = 0
+                skipped_count = 0
+                error_count = 0
+                
+                # 使用线程池处理
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = []
+                    for info in files_to_process:
+                        future = executor.submit(
+                            process_single_file,
+                            info.filename, output_dir, first_folder, 
+                            archive.read(info), skip_user_files, skip_patterns
+                        )
+                        futures.append(future)
+                    
+                    # 处理结果
+                    completed = 0
+                    for future in as_completed(futures):
+                        completed += 1
+                        progress = completed / total_files
+                        progress_bar.progress(progress)
+                        
+                        result = future.result()
+                        if result['status'] == 'copied':
+                            copied_count += 1
+                        elif result['status'] == 'skipped':
+                            skipped_count += 1
+                        else:
+                            error_count += 1
+                
+                return {
+                    'success': True,
+                    'copied': copied_count,
+                    'skipped': skipped_count,
+                    'errors': error_count,
+                    'output_dir': output_dir
+                }
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+    except Exception as e:
+        return {'error': str(e)}
+
+def extract_7z(file_data, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns):
+    """使用 py7zr 提取 7z 文件"""
+    try:
+        import py7zr
+        
+        with tempfile.NamedTemporaryFile(suffix='.7z', delete=False) as tmp_file:
+            tmp_file.write(file_data)
+            tmp_path = tmp_file.name
+        
+        try:
+            with py7zr.SevenZipFile(tmp_path, mode='r') as archive:
+                file_list = archive.getnames()
+                file_list = [f for f in file_list if not f.endswith('/')]
+                
+                if not file_list:
+                    return {'error': '压缩文件为空'}
+                
+                # 获取第一层文件夹
+                first_folder = None
+                for name in file_list:
+                    if '/' in name:
+                        potential_folder = name.split('/')[0]
+                        if potential_folder:
+                            first_folder = potential_folder
+                            break
+                
+                if not first_folder:
+                    first_folder = ''
+                    files_to_process = file_list
+                else:
+                    prefix = first_folder + '/'
+                    files_to_process = [f for f in file_list if f.startswith(prefix)]
+                
+                total_files = len(files_to_process)
+                status_text.text(f"找到 {total_files} 个文件需要处理")
+                
+                copied_count = 0
+                skipped_count = 0
+                error_count = 0
+                
+                # 读取所有文件内容
+                all_content = archive.read(files_to_process)
+                
+                # 使用线程池处理
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = []
+                    for file_path in files_to_process:
+                        future = executor.submit(
+                            process_single_file,
+                            file_path, output_dir, first_folder, 
+                            all_content[file_path].read(), skip_user_files, skip_patterns
+                        )
+                        futures.append(future)
+                    
+                    # 处理结果
+                    completed = 0
+                    for future in as_completed(futures):
+                        completed += 1
+                        progress = completed / total_files
+                        progress_bar.progress(progress)
+                        
+                        result = future.result()
+                        if result['status'] == 'copied':
+                            copied_count += 1
+                        elif result['status'] == 'skipped':
+                            skipped_count += 1
+                        else:
+                            error_count += 1
+                
+                return {
+                    'success': True,
+                    'copied': copied_count,
+                    'skipped': skipped_count,
+                    'errors': error_count,
+                    'output_dir': output_dir
+                }
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+    except Exception as e:
+        return {'error': str(e)}
 
 def process_archive(archive_file, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns):
     """处理压缩文件"""
@@ -83,98 +242,16 @@ def process_archive(archive_file, output_dir, max_workers, progress_bar, status_
         is_zip = file_data[:2] == b'PK'
         is_7z = file_data[:6] == b'\x37\x7A\xBC\xAF\x27\x1C'
         
+        # 根据文件类型选择处理方式
         if is_zip:
-            archive_obj = zipfile.ZipFile(archive_file)
-            file_list = archive_obj.namelist()
+            return extract_zip(file_data, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns)
         elif is_7z:
-            with tempfile.NamedTemporaryFile(suffix='.7z', delete=False) as tmp_file:
-                tmp_file.write(file_data)
-                tmp_path = tmp_file.name
-            archive_obj = py7zr.SevenZipFile(tmp_path, mode='r')
-            file_list = archive_obj.getnames()
-            temp_file_path = tmp_path
+            return extract_7z(file_data, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns)
         elif is_rar:
-            with tempfile.NamedTemporaryFile(suffix='.rar', delete=False) as tmp_file:
-                tmp_file.write(file_data)
-                tmp_path = tmp_file.name
-            archive_obj = py7zr.SevenZipFile(tmp_path, mode='r')
-            file_list = archive_obj.getnames()
-            temp_file_path = tmp_path
+            # RAR 文件也用 py7zr 处理（如果支持）
+            return extract_7z(file_data, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns)
         else:
             return {'error': '无法识别的压缩文件格式'}
-        
-        if not file_list:
-            return {'error': '压缩文件为空'}
-        
-        # 获取第一层文件夹
-        first_folder = None
-        for name in file_list:
-            if '/' in name:
-                potential_folder = name.split('/')[0]
-                if potential_folder and not name.endswith('/'):
-                    first_folder = potential_folder
-                    break
-        
-        if not first_folder:
-            first_folder = ''
-            files_to_process = [f for f in file_list if not f.endswith('/')]
-        else:
-            prefix = first_folder + '/'
-            files_to_process = [
-                f for f in file_list 
-                if not f.endswith('/') and f.startswith(prefix)
-            ]
-        
-        total_files = len(files_to_process)
-        status_text.text(f"找到 {total_files} 个文件需要处理")
-        
-        copied_count = 0
-        skipped_count = 0
-        error_count = 0
-        
-        # 读取所有文件内容到内存
-        all_content = archive_obj.read(files_to_process)
-        
-        # 使用线程池处理
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
-            for file_path in files_to_process:
-                future = executor.submit(
-                    process_single_file,
-                    file_path, output_dir, first_folder, all_content, skip_user_files, skip_patterns
-                )
-                futures.append(future)
-            
-            # 处理结果
-            completed = 0
-            for future in as_completed(futures):
-                completed += 1
-                progress = completed / total_files
-                progress_bar.progress(progress)
-                
-                result = future.result()
-                if result['status'] == 'copied':
-                    copied_count += 1
-                elif result['status'] == 'skipped':
-                    skipped_count += 1
-                else:
-                    error_count += 1
-        
-        # 清理
-        archive_obj.close()
-        
-        # 删除临时文件
-        if 'temp_file_path' in locals():
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-        
-        return {
-            'success': True,
-            'copied': copied_count,
-            'skipped': skipped_count,
-            'errors': error_count,
-            'output_dir': output_dir
-        }
         
     except Exception as e:
         return {'error': str(e)}
