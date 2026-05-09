@@ -1,12 +1,6 @@
 """
 压缩文件处理器 - 网页版
 支持 RAR、ZIP、7z 格式的文件提取
-
-部署方式（本地运行，可访问本地文件夹）:
-    streamlit run streamlit_app.py
-
-云端部署（Streamlit Cloud）:
-    https://share.streamlit.io/ 部署后使用上传/下载功能
 """
 
 import os
@@ -18,36 +12,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit as st
 from pathlib import Path
 
-# 检测运行环境
-def is_local_deployment():
-    """检测是否为本地部署（而非 Streamlit Cloud）"""
-    return not os.path.exists('/mount/src')
-
-def detect_archive_type(file_data):
-    """通过文件头魔数检测压缩文件真实类型"""
-    if len(file_data) < 4:
-        return None
-    
-    # RAR 文件头 (52 61 72 21 1A 07 00)
-    if file_data[:4] == b'Rar!' or file_data[:4] == b'\x52\x61\x72\x21':
-        return 'rar'
-    
-    # ZIP 文件头 (PK\x03\x04)
-    if file_data[:2] == b'PK':
-        return 'zip'
-    
-    # 7z 文件头 (37 7A BC AF 27 1C)
-    if file_data[:2] == b'\x37\x7A' or file_data[:6] == b'\x37\x7A\xBC\xAF\x27\x1C':
-        return '7z'
-    
-    return None
-
 # 页面配置
 st.set_page_config(
     page_title="📦 压缩文件处理器",
     page_icon="📦",
-    layout="wide" if is_local_deployment() else "centered",
-    initial_sidebar_state="expanded"
+    layout="centered",
+    initial_sidebar_state="collapsed"
 )
 
 # 支持的压缩格式
@@ -70,7 +40,7 @@ def should_skip_file(filename, skip_user_files, skip_patterns):
                 return True, pattern
     return False, None
 
-def process_single_file(file_path, output_dir, first_folder, all_content):
+def process_single_file(file_path, output_dir, first_folder, all_content, skip_user_files, skip_patterns):
     """处理单个文件"""
     try:
         # 计算相对路径
@@ -80,11 +50,7 @@ def process_single_file(file_path, output_dir, first_folder, all_content):
             relative_path = file_path
         
         # 检查是否应该跳过
-        skip, pattern = should_skip_file(
-            relative_path, 
-            st.session_state.get('skip_user_files', True),
-            st.session_state.get('skip_patterns', 'User.,temp_,.')
-        )
+        skip, pattern = should_skip_file(relative_path, skip_user_files, skip_patterns)
         if skip:
             return {'status': 'skipped', 'name': relative_path, 'reason': f'匹配规则: {pattern}'}
         
@@ -102,42 +68,40 @@ def process_single_file(file_path, output_dir, first_folder, all_content):
     except Exception as e:
         return {'status': 'error', 'name': relative_path, 'error': str(e)}
 
-def process_archive(archive_file, output_dir, max_workers, progress_bar, status_text):
+def process_archive(archive_file, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns):
     """处理压缩文件"""
     try:
         # 读取文件数据
         file_data = archive_file.getvalue()
         
         # 检测真实文件类型
-        real_type = detect_archive_type(file_data)
+        if len(file_data) < 4:
+            return {'error': '文件太小，无法识别格式'}
         
-        if real_type == 'zip':
-            # 使用 zipfile 处理 ZIP
+        # 通过魔数检测文件类型
+        is_rar = file_data[:4] == b'Rar!' or file_data[:4] == b'\x52\x61\x72\x21'
+        is_zip = file_data[:2] == b'PK'
+        is_7z = file_data[:6] == b'\x37\x7A\xBC\xAF\x27\x1C'
+        
+        if is_zip:
             archive_obj = zipfile.ZipFile(archive_file)
             file_list = archive_obj.namelist()
-            archive_type = 'zip'
-        elif real_type == '7z':
-            # 保存临时文件后用 py7zr 处理
+        elif is_7z:
             with tempfile.NamedTemporaryFile(suffix='.7z', delete=False) as tmp_file:
                 tmp_file.write(file_data)
                 tmp_path = tmp_file.name
-            
             archive_obj = py7zr.SevenZipFile(tmp_path, mode='r')
             file_list = archive_obj.getnames()
-            archive_type = '7z'
             temp_file_path = tmp_path
-        elif real_type == 'rar':
-            # RAR 文件也尝试用 py7zr 处理
+        elif is_rar:
             with tempfile.NamedTemporaryFile(suffix='.rar', delete=False) as tmp_file:
                 tmp_file.write(file_data)
                 tmp_path = tmp_file.name
-            
             archive_obj = py7zr.SevenZipFile(tmp_path, mode='r')
             file_list = archive_obj.getnames()
-            archive_type = 'rar'
             temp_file_path = tmp_path
         else:
-            return {'error': f'无法识别的压缩文件格式'}
+            return {'error': '无法识别的压缩文件格式'}
         
         if not file_list:
             return {'error': '压缩文件为空'}
@@ -177,7 +141,7 @@ def process_archive(archive_file, output_dir, max_workers, progress_bar, status_
             for file_path in files_to_process:
                 future = executor.submit(
                     process_single_file,
-                    file_path, output_dir, first_folder, all_content
+                    file_path, output_dir, first_folder, all_content, skip_user_files, skip_patterns
                 )
                 futures.append(future)
             
@@ -216,18 +180,9 @@ def process_archive(archive_file, output_dir, max_workers, progress_bar, status_
         return {'error': str(e)}
 
 def main():
-    # 检测部署环境
-    is_local = is_local_deployment()
-    
     # 标题
     st.title("📦 压缩文件处理器")
     st.markdown("支持 RAR、ZIP、7z 格式的文件提取")
-    
-    # 环境提示
-    if is_local:
-        st.success("💻 **本地模式** - 可直接保存到本地文件夹")
-    else:
-        st.info("☁️ **云端模式** - 上传后下载 ZIP 到本地")
     
     # 侧边栏 - 设置
     with st.sidebar:
@@ -251,26 +206,9 @@ def main():
         st.markdown("**支持的格式:**")
         for ext, desc in SUPPORTED_FORMATS.items():
             st.markdown(f"- {ext} {desc}")
-        
-        st.markdown("---")
-        st.markdown("**使用说明:**")
-        if is_local:
-            st.markdown("""
-            1. 上传/选择压缩文件
-            2. 选择输出文件夹
-            3. 点击处理
-            4. 文件直接保存到本地
-            """)
-        else:
-            st.markdown("""
-            1. 上传压缩文件
-            2. 点击处理
-            3. 下载 ZIP 到本地
-            4. 解压到目标文件夹
-            """)
     
     # 主界面 - 文件上传
-    st.subheader("📤 1. 上传压缩文件")
+    st.subheader("📤 上传压缩文件")
     uploaded_file = st.file_uploader(
         "拖拽或选择压缩文件",
         type=list(SUPPORTED_FORMATS.keys()),
@@ -284,59 +222,12 @@ def main():
         file_size = uploaded_file.size / 1024 / 1024  # MB
         st.info(f"文件大小: {file_size:.2f} MB")
         
-        # 2. 选择输出目录
-        st.subheader("📁 2. 选择输出目录")
-        
-        if is_local:
-            # 本地模式：可选择文件夹
-            default_dir = os.path.expanduser("~/Downloads")
-            output_dir = st.text_input(
-                "输出路径",
-                value=default_dir,
-                help="处理后的文件将保存到此目录"
-            )
-            
-            # 添加文件夹选择按钮
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                if st.button("📂 浏览文件夹", use_container_width=True):
-                    try:
-                        import tkinter as tk
-                        from tkinter import filedialog
-                        root = tk.Tk()
-                        root.withdraw()
-                        selected_dir = filedialog.askdirectory(initialdir=output_dir)
-                        root.destroy()
-                        if selected_dir:
-                            st.session_state['output_dir'] = selected_dir
-                    except Exception:
-                        st.info("无法打开文件夹选择器，请手动输入路径")
-            
-            # 显示当前选择的路径
-            if 'output_dir' in st.session_state:
-                output_dir = st.session_state['output_dir']
-                st.text_input("输出路径", value=output_dir, key='output_path')
-        else:
-            # 云端模式：显示说明
-            st.markdown("""
-            > 💡 **云端部署说明**
-            > 
-            > 由于安全限制，云端服务器无法直接访问您的本地文件夹。
-            > 处理完成后请下载 ZIP 文件，然后解压到您需要的文件夹。
-            """)
-            output_dir = tempfile.mkdtemp()
-            st.text_input("临时处理目录", value=output_dir, disabled=True, help="云端临时目录，处理完成后需下载")
-        
-        # 3. 开始处理
-        st.subheader("🚀 3. 开始处理")
+        # 开始处理
+        st.subheader("🚀 开始处理")
         
         if st.button("开始处理", type="primary", use_container_width=True):
-            if is_local and not output_dir:
-                st.error("请输入输出目录！")
-                return
-            
-            # 创建输出目录
-            os.makedirs(output_dir, exist_ok=True)
+            # 创建临时输出目录
+            output_dir = tempfile.mkdtemp()
             
             # 进度条
             progress_bar = st.progress(0)
@@ -346,7 +237,9 @@ def main():
             def run_processing():
                 return process_archive(
                     uploaded_file, output_dir, max_workers,
-                    progress_bar, status_text
+                    progress_bar, status_text,
+                    st.session_state.get('skip_user_files', True),
+                    st.session_state.get('skip_patterns', 'User.,temp_,.')
                 )
             
             with st.spinner("正在处理..."):
@@ -362,9 +255,6 @@ def main():
                 col1.metric("复制文件", result['copied'])
                 col2.metric("跳过文件", result['skipped'])
                 col3.metric("错误文件", result['errors'])
-                
-                if is_local:
-                    st.markdown(f"**输出目录:** `{result['output_dir']}`")
                 
                 # 列出处理的文件
                 with st.expander("📋 查看处理的文件列表"):
@@ -385,7 +275,7 @@ def main():
                         st.markdown("文件列表无法显示")
                 
                 # 下载按钮
-                st.subheader("📥 4. 下载结果")
+                st.subheader("📥 下载结果")
                 
                 if os.path.exists(output_dir) and os.listdir(output_dir):
                     zip_base = f"{Path(uploaded_file.name).stem}_extracted"
@@ -404,22 +294,8 @@ def main():
                             mime="application/zip",
                             use_container_width=True
                         )
-                    
-                    if not is_local:
-                        st.markdown("""
-                        > 💡 请下载 ZIP 文件并解压到您需要的目标文件夹
-                        """)
                 else:
                     st.info("没有文件需要下载")
-
-    # 底部说明
-    st.markdown("---")
-    st.markdown("""
-    <div style='text-align: center; color: #888; font-size: 0.9em;'>
-    📦 压缩文件处理器 | 支持 RAR、ZIP、7z 格式<br>
-    本地运行: <code>streamlit run streamlit_app.py</code>
-    </div>
-    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
