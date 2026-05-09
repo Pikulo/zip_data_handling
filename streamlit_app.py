@@ -11,6 +11,7 @@
 
 import os
 import shutil
+import zipfile
 import py7zr
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,9 +21,26 @@ from pathlib import Path
 # 检测运行环境
 def is_local_deployment():
     """检测是否为本地部署（而非 Streamlit Cloud）"""
-    # Streamlit Cloud 环境下 /mount/src 存在但无法访问本地文件系统
-    # 本地环境可以访问任意本地路径
     return not os.path.exists('/mount/src')
+
+def detect_archive_type(file_data):
+    """通过文件头魔数检测压缩文件真实类型"""
+    if len(file_data) < 4:
+        return None
+    
+    # RAR 文件头 (52 61 72 21 1A 07 00)
+    if file_data[:4] == b'Rar!' or file_data[:4] == b'\x52\x61\x72\x21':
+        return 'rar'
+    
+    # ZIP 文件头 (PK\x03\x04)
+    if file_data[:2] == b'PK':
+        return 'zip'
+    
+    # 7z 文件头 (37 7A BC AF 27 1C)
+    if file_data[:2] == b'\x37\x7A' or file_data[:6] == b'\x37\x7A\xBC\xAF\x27\x1C':
+        return '7z'
+    
+    return None
 
 # 页面配置
 st.set_page_config(
@@ -86,92 +104,113 @@ def process_single_file(file_path, output_dir, first_folder, all_content):
 
 def process_archive(archive_file, output_dir, max_workers, progress_bar, status_text):
     """处理压缩文件"""
-    archive_type = Path(archive_file.name).suffix.lower()
-    
     try:
-        # 保存临时文件
-        with tempfile.NamedTemporaryFile(suffix=archive_type, delete=False) as tmp_file:
-            tmp_file.write(archive_file.getvalue())
-            tmp_path = tmp_file.name
+        # 读取文件数据
+        file_data = archive_file.getvalue()
         
-        try:
-            # 使用 py7zr 处理所有格式
+        # 检测真实文件类型
+        real_type = detect_archive_type(file_data)
+        
+        if real_type == 'zip':
+            # 使用 zipfile 处理 ZIP
+            archive_obj = zipfile.ZipFile(archive_file)
+            file_list = archive_obj.namelist()
+            archive_type = 'zip'
+        elif real_type == '7z':
+            # 保存临时文件后用 py7zr 处理
+            with tempfile.NamedTemporaryFile(suffix='.7z', delete=False) as tmp_file:
+                tmp_file.write(file_data)
+                tmp_path = tmp_file.name
+            
             archive_obj = py7zr.SevenZipFile(tmp_path, mode='r')
-            
-            # 获取文件列表
             file_list = archive_obj.getnames()
+            archive_type = '7z'
+            temp_file_path = tmp_path
+        elif real_type == 'rar':
+            # RAR 文件也尝试用 py7zr 处理
+            with tempfile.NamedTemporaryFile(suffix='.rar', delete=False) as tmp_file:
+                tmp_file.write(file_data)
+                tmp_path = tmp_file.name
             
-            if not file_list:
-                return {'error': '压缩文件为空'}
+            archive_obj = py7zr.SevenZipFile(tmp_path, mode='r')
+            file_list = archive_obj.getnames()
+            archive_type = 'rar'
+            temp_file_path = tmp_path
+        else:
+            return {'error': f'无法识别的压缩文件格式'}
+        
+        if not file_list:
+            return {'error': '压缩文件为空'}
+        
+        # 获取第一层文件夹
+        first_folder = None
+        for name in file_list:
+            if '/' in name:
+                potential_folder = name.split('/')[0]
+                if potential_folder and not name.endswith('/'):
+                    first_folder = potential_folder
+                    break
+        
+        if not first_folder:
+            first_folder = ''
+            files_to_process = [f for f in file_list if not f.endswith('/')]
+        else:
+            prefix = first_folder + '/'
+            files_to_process = [
+                f for f in file_list 
+                if not f.endswith('/') and f.startswith(prefix)
+            ]
+        
+        total_files = len(files_to_process)
+        status_text.text(f"找到 {total_files} 个文件需要处理")
+        
+        copied_count = 0
+        skipped_count = 0
+        error_count = 0
+        
+        # 读取所有文件内容到内存
+        all_content = archive_obj.read(files_to_process)
+        
+        # 使用线程池处理
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for file_path in files_to_process:
+                future = executor.submit(
+                    process_single_file,
+                    file_path, output_dir, first_folder, all_content
+                )
+                futures.append(future)
             
-            # 获取第一层文件夹
-            first_folder = None
-            for name in file_list:
-                if '/' in name:
-                    potential_folder = name.split('/')[0]
-                    if potential_folder and not name.endswith('/'):
-                        first_folder = potential_folder
-                        break
-            
-            if not first_folder:
-                first_folder = ''
-                files_to_process = [f for f in file_list if not f.endswith('/')]
-            else:
-                prefix = first_folder + '/'
-                files_to_process = [
-                    f for f in file_list 
-                    if not f.endswith('/') and f.startswith(prefix)
-                ]
-            
-            total_files = len(files_to_process)
-            status_text.text(f"找到 {total_files} 个文件需要处理")
-            
-            copied_count = 0
-            skipped_count = 0
-            error_count = 0
-            
-            # 读取所有文件内容到内存
-            all_content = archive_obj.read(files_to_process)
-            
-            # 使用线程池处理
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = []
-                for file_path in files_to_process:
-                    future = executor.submit(
-                        process_single_file,
-                        file_path, output_dir, first_folder, all_content
-                    )
-                    futures.append(future)
+            # 处理结果
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                progress = completed / total_files
+                progress_bar.progress(progress)
                 
-                # 处理结果
-                completed = 0
-                for future in as_completed(futures):
-                    completed += 1
-                    progress = completed / total_files
-                    progress_bar.progress(progress)
-                    
-                    result = future.result()
-                    if result['status'] == 'copied':
-                        copied_count += 1
-                    elif result['status'] == 'skipped':
-                        skipped_count += 1
-                    else:
-                        error_count += 1
-            
-            # 清理
-            archive_obj.close()
-            
-            return {
-                'success': True,
-                'copied': copied_count,
-                'skipped': skipped_count,
-                'errors': error_count,
-                'output_dir': output_dir
-            }
-        finally:
-            # 删除临时文件
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+                result = future.result()
+                if result['status'] == 'copied':
+                    copied_count += 1
+                elif result['status'] == 'skipped':
+                    skipped_count += 1
+                else:
+                    error_count += 1
+        
+        # 清理
+        archive_obj.close()
+        
+        # 删除临时文件
+        if 'temp_file_path' in locals():
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+        
+        return {
+            'success': True,
+            'copied': copied_count,
+            'skipped': skipped_count,
+            'errors': error_count,
+            'output_dir': output_dir
+        }
         
     except Exception as e:
         return {'error': str(e)}
@@ -278,7 +317,7 @@ def main():
                 output_dir = st.session_state['output_dir']
                 st.text_input("输出路径", value=output_dir, key='output_path')
         else:
-            # 云端模式：显示说明，无法选择本地文件夹
+            # 云端模式：显示说明
             st.markdown("""
             > 💡 **云端部署说明**
             > 
@@ -325,7 +364,6 @@ def main():
                 col3.metric("错误文件", result['errors'])
                 
                 if is_local:
-                    # 本地模式：显示输出目录
                     st.markdown(f"**输出目录:** `{result['output_dir']}`")
                 
                 # 列出处理的文件
@@ -350,7 +388,6 @@ def main():
                 st.subheader("📥 4. 下载结果")
                 
                 if os.path.exists(output_dir) and os.listdir(output_dir):
-                    # 创建 ZIP 下载
                     zip_base = f"{Path(uploaded_file.name).stem}_extracted"
                     zip_path = os.path.join(tempfile.gettempdir(), f"{zip_base}.zip")
                     shutil.make_archive(
