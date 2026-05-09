@@ -261,8 +261,14 @@ def main():
     st.title("📦 压缩文件处理器")
     st.markdown("支持 ZIP、7z 格式的文件提取")
     
-    # RAR 提示
-    st.warning("⚠️ **RAR 格式暂不支持** - 云端部署无法处理 RAR 文件，请使用 ZIP 或 7z 格式")
+    # RAR 提示（使用 expander 避免遮挡）
+    with st.expander("ℹ️ 支持格式说明"):
+        st.markdown("""
+        - **支持**: ZIP、7z 格式
+        - **不支持**: RAR 格式（云端部署限制）
+        
+        如需处理 RAR 文件，请在本地运行。
+        """)
     
     # 侧边栏 - 设置
     with st.sidebar:
