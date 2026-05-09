@@ -1,15 +1,20 @@
 # 📦 压缩文件处理器 (Streamlit版)
 
-一个基于 Streamlit 的网页版压缩文件提取工具，支持 RAR、ZIP、7z 等常见压缩格式。
+一个基于 Streamlit 的网页版压缩文件提取工具，支持 ZIP、7z 格式。
 
 ## ✨ 功能特点
 
-- **多格式支持**：支持 RAR、ZIP、7z、TAR、GZIP、BZIP2、XZ 格式
+- **多格式支持**：支持 ZIP、7z 格式
 - **多线程处理**：可配置线程数，并行处理文件提取
 - **智能过滤**：自动跳过临时文件和用户文件，可自定义过滤规则
 - **一键下载**：处理完成后可直接下载提取结果
 - **响应式设计**：支持桌面端和移动端使用
 - **Web 界面**：无需安装本地软件，浏览器中直接使用
+
+## ⚠️ 注意事项
+
+- **云端部署（Streamlit Cloud）**：仅支持 ZIP、7z 格式
+- **本地运行**：支持 RAR、ZIP、7z 格式（需要安装 unrar 工具）
 
 ## 🚀 快速开始
 
@@ -26,7 +31,7 @@ git clone <your-repo-url>
 cd <project-directory>
 
 # 安装依赖
-pip install -r requirements_streamlit.txt
+pip install -r requirements.txt
 ```
 
 ### 运行应用
@@ -40,10 +45,9 @@ streamlit run streamlit_app.py
 ## 📖 使用方法
 
 1. **上传文件**：点击"选择压缩文件"或直接拖拽文件到上传区域
-2. **选择输出**：默认使用临时目录，可自定义输出路径
-3. **配置过滤**：在侧边栏设置线程数和文件过滤规则
-4. **开始处理**：点击"开始处理"按钮
-5. **下载结果**：处理完成后可下载 ZIP 文件到本地
+2. **配置过滤**：在侧边栏设置线程数和文件过滤规则
+3. **开始处理**：点击"开始处理"按钮
+4. **下载结果**：处理完成后可下载 ZIP 文件到本地
 
 ## ⚙️ 配置选项
 
@@ -57,7 +61,6 @@ streamlit run streamlit_app.py
 
 ```
 streamlit>=1.28.0
-rarfile>=4.0
 py7zr>=0.20.0
 ```
 
@@ -65,17 +68,36 @@ py7zr>=0.20.0
 
 - **前端**：Streamlit
 - **后端**：Python
-- **压缩库**：rarfile、py7zr、zipfile
+- **压缩库**：py7zr、zipfile
 - **并发处理**：concurrent.futures.ThreadPoolExecutor
 
 ## 📝 文件结构
 
 ```
 .
-├── streamlit_app.py          # 主应用文件
-├── requirements_streamlit.txt # 依赖配置
-├── README.md                 # 项目说明
-└── LICENSE                   # MIT 许可证
+├── streamlit_app.py      # 主应用文件
+├── requirements.txt      # 依赖配置
+├── packages.txt          # 系统依赖（云端部署）
+├── README.md             # 项目说明
+└── LICENSE               # MIT 许可证
+```
+
+## 💻 本地运行（支持 RAR 格式）
+
+如需处理 RAR 文件，请在本地运行：
+
+```bash
+# 安装 rarfile 依赖
+pip install rarfile
+
+# macOS
+brew install unrar
+
+# Ubuntu/Debian
+sudo apt install unrar
+
+# 运行应用
+streamlit run streamlit_app.py
 ```
 
 ## 🤝 贡献

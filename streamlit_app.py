@@ -1,6 +1,8 @@
 """
 压缩文件处理器 - 网页版
-支持 RAR、ZIP、7z 格式的文件提取
+支持 ZIP、7z 格式的文件提取
+
+注意：RAR 格式需要本地运行（需要安装 unrar 工具）
 """
 
 import os
@@ -21,7 +23,6 @@ st.set_page_config(
 
 # 支持的压缩格式
 SUPPORTED_FORMATS = {
-    '.rar': 'RAR文件',
     '.zip': 'ZIP文件',
     '.7z': '7z文件',
     '.tar': 'TAR文件',
@@ -238,9 +239,9 @@ def process_archive(archive_file, output_dir, max_workers, progress_bar, status_
             return {'error': '文件太小，无法识别格式'}
         
         # 通过魔数检测文件类型
-        is_rar = file_data[:4] == b'Rar!' or file_data[:4] == b'\x52\x61\x72\x21'
         is_zip = file_data[:2] == b'PK'
         is_7z = file_data[:6] == b'\x37\x7A\xBC\xAF\x27\x1C'
+        is_rar = file_data[:4] == b'Rar!' or file_data[:4] == b'\x52\x61\x72\x21'
         
         # 根据文件类型选择处理方式
         if is_zip:
@@ -248,10 +249,9 @@ def process_archive(archive_file, output_dir, max_workers, progress_bar, status_
         elif is_7z:
             return extract_7z(file_data, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns)
         elif is_rar:
-            # RAR 文件也用 py7zr 处理（如果支持）
-            return extract_7z(file_data, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns)
+            return {'error': 'RAR 格式暂不支持，请在本地运行此应用或使用 ZIP/7z 格式'}
         else:
-            return {'error': '无法识别的压缩文件格式'}
+            return {'error': '无法识别的压缩文件格式，请上传 ZIP 或 7z 格式'}
         
     except Exception as e:
         return {'error': str(e)}
@@ -259,7 +259,10 @@ def process_archive(archive_file, output_dir, max_workers, progress_bar, status_
 def main():
     # 标题
     st.title("📦 压缩文件处理器")
-    st.markdown("支持 RAR、ZIP、7z 格式的文件提取")
+    st.markdown("支持 ZIP、7z 格式的文件提取")
+    
+    # RAR 提示
+    st.warning("⚠️ **RAR 格式暂不支持** - 云端部署无法处理 RAR 文件，请使用 ZIP 或 7z 格式")
     
     # 侧边栏 - 设置
     with st.sidebar:
@@ -283,13 +286,24 @@ def main():
         st.markdown("**支持的格式:**")
         for ext, desc in SUPPORTED_FORMATS.items():
             st.markdown(f"- {ext} {desc}")
+        
+        st.markdown("---")
+        st.markdown("""
+        **提示:** 如需处理 RAR 文件，请在本地运行：
+        ```bash
+        pip install rarfile
+        # macOS: brew install unrar
+        # Ubuntu: sudo apt install unrar
+        streamlit run streamlit_app.py
+        ```
+        """)
     
     # 主界面 - 文件上传
     st.subheader("📤 上传压缩文件")
     uploaded_file = st.file_uploader(
         "拖拽或选择压缩文件",
         type=list(SUPPORTED_FORMATS.keys()),
-        help="支持 RAR、ZIP、7z 格式"
+        help="支持 ZIP、7z 格式"
     )
     
     if uploaded_file:
