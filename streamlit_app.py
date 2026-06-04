@@ -146,24 +146,42 @@ def extract_zip(file_data, output_dir, max_workers, progress_bar, status_text, s
     except Exception as e:
         return {'error': str(e)}
 
+def _find_rar_tool():
+    """查找可用的 RAR 解压工具"""
+    for tool in ['unar', 'bsdtar']:
+        if shutil.which(tool):
+            return tool
+    return None
+
 def extract_rar(file_data, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns):
-    """使用 unar 命令行工具提取 RAR 文件"""
+    """使用命令行工具提取 RAR 文件（支持 unar 和 bsdtar）"""
+    tool = _find_rar_tool()
+    if not tool:
+        return {'error': '未找到可用的解压工具（unar 或 bsdtar），无法处理 RAR 文件'}
+    
     try:
         with tempfile.NamedTemporaryFile(suffix='.rar', delete=False) as tmp_file:
             tmp_file.write(file_data)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
             tmp_path = tmp_file.name
         
         try:
-            # 使用 unar 解压到临时目录
+            # 使用解压工具解压到临时目录
             temp_extract_dir = tempfile.mkdtemp()
             try:
+                if tool == 'unar':
+                    cmd = ['unar', '-o', temp_extract_dir, '-f', '-q', tmp_path]
+                elif tool == 'bsdtar':
+                    cmd = ['bsdtar', '-xf', tmp_path, '-C', temp_extract_dir]
+                
                 result = subprocess.run(
-                    ['unar', '-o', temp_extract_dir, tmp_path],
-                    capture_output=True, text=True, timeout=300
+                    cmd, capture_output=True, text=True, timeout=300
                 )
                 
                 if result.returncode != 0:
-                    return {'error': f'unar 解压失败: {result.stderr.strip()}'}
+                    error_detail = result.stderr.strip() or result.stdout.strip() or '未知错误'
+                    return {'error': f'RAR 解压失败 ({tool}, code={result.returncode}): {error_detail}'}
                 
                 # 收集解压后的所有文件
                 file_list = []
@@ -174,7 +192,7 @@ def extract_rar(file_data, output_dir, max_workers, progress_bar, status_text, s
                         file_list.append((full_path, rel_path))
                 
                 if not file_list:
-                    return {'error': '压缩文件为空'}
+                    return {'error': f'压缩文件为空或 {tool} 未能解压出任何文件'}
                 
                 # 获取第一层文件夹
                 first_folder = None
