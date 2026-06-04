@@ -7,6 +7,7 @@ import os
 import shutil
 import zipfile
 import tempfile
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit as st
 from pathlib import Path
@@ -146,38 +147,52 @@ def extract_zip(file_data, output_dir, max_workers, progress_bar, status_text, s
         return {'error': str(e)}
 
 def extract_rar(file_data, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns):
-    """使用 rarfile 提取 RAR 文件"""
+    """使用 unar 命令行工具提取 RAR 文件"""
     try:
-        import rarfile
-        
         with tempfile.NamedTemporaryFile(suffix='.rar', delete=False) as tmp_file:
             tmp_file.write(file_data)
             tmp_path = tmp_file.name
         
         try:
-            with rarfile.RarFile(tmp_path, 'r') as archive:
-                file_list = [info for info in archive.infolist() if not info.is_dir()]
+            # 使用 unar 解压到临时目录
+            temp_extract_dir = tempfile.mkdtemp()
+            try:
+                result = subprocess.run(
+                    ['unar', '-o', temp_extract_dir, tmp_path],
+                    capture_output=True, text=True, timeout=300
+                )
+                
+                if result.returncode != 0:
+                    return {'error': f'unar 解压失败: {result.stderr.strip()}'}
+                
+                # 收集解压后的所有文件
+                file_list = []
+                for root, dirs, files in os.walk(temp_extract_dir):
+                    for fname in files:
+                        full_path = os.path.join(root, fname)
+                        rel_path = os.path.relpath(full_path, temp_extract_dir).replace('\\', '/')
+                        file_list.append((full_path, rel_path))
                 
                 if not file_list:
                     return {'error': '压缩文件为空'}
                 
                 # 获取第一层文件夹
                 first_folder = None
-                for info in file_list:
-                    if '/' in info.filename:
-                        potential_folder = info.filename.split('/')[0]
+                for _, rel_path in file_list:
+                    if '/' in rel_path:
+                        potential_folder = rel_path.split('/')[0]
                         if potential_folder:
                             first_folder = potential_folder
                             break
                 
                 if not first_folder:
                     first_folder = ''
-                    files_to_process = [info for info in file_list]
+                    files_to_process = file_list
                 else:
                     prefix = first_folder + '/'
                     files_to_process = [
-                        info for info in file_list 
-                        if info.filename.startswith(prefix)
+                        (fp, rp) for fp, rp in file_list
+                        if rp.startswith(prefix)
                     ]
                 
                 total_files = len(files_to_process)
@@ -190,11 +205,13 @@ def extract_rar(file_data, output_dir, max_workers, progress_bar, status_text, s
                 # 使用线程池处理
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = []
-                    for info in files_to_process:
+                    for full_path, rel_path in files_to_process:
+                        with open(full_path, 'rb') as f:
+                            file_content = f.read()
                         future = executor.submit(
                             process_single_file,
-                            info.filename, output_dir, first_folder, 
-                            archive.read(info), skip_user_files, skip_patterns
+                            rel_path, output_dir, first_folder,
+                            file_content, skip_user_files, skip_patterns
                         )
                         futures.append(future)
                     
@@ -220,13 +237,17 @@ def extract_rar(file_data, output_dir, max_workers, progress_bar, status_text, s
                     'errors': error_count,
                     'output_dir': output_dir
                 }
+            finally:
+                # 清理临时解压目录
+                if os.path.exists(temp_extract_dir):
+                    shutil.rmtree(temp_extract_dir, ignore_errors=True)
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
-    except ImportError:
-        return {'error': 'RAR 支持库未安装，请确保 rarfile 已安装且系统已配置 unrar 工具'}
+    except FileNotFoundError:
+        return {'error': 'unar 工具未安装，无法处理 RAR 文件'}
     except Exception as e:
-        return {'error': str(e)}
+        return {'error': f'RAR 解压出错: {str(e)}'}
 
 def extract_7z(file_data, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns):
     """使用 py7zr 提取 7z 文件"""
