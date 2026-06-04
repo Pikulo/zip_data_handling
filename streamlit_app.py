@@ -146,126 +146,148 @@ def extract_zip(file_data, output_dir, max_workers, progress_bar, status_text, s
     except Exception as e:
         return {'error': str(e)}
 
-def _find_rar_tool():
-    """查找可用的 RAR 解压工具"""
-    for tool in ['unar', 'bsdtar']:
-        if shutil.which(tool):
-            return tool
-    return None
+def _get_rar_tools():
+    """返回可用的 RAR 解压工具列表（按优先级排序）"""
+    tools = []
+    # bsdtar (libarchive) 对 RAR5 格式支持更好，优先使用
+    for tool_name in ['bsdtar', 'unar']:
+        if shutil.which(tool_name):
+            tools.append(tool_name)
+    return tools
 
 def extract_rar(file_data, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns):
-    """使用命令行工具提取 RAR 文件（支持 unar 和 bsdtar）"""
-    tool = _find_rar_tool()
-    if not tool:
-        return {'error': '未找到可用的解压工具（unar 或 bsdtar），无法处理 RAR 文件'}
+    """使用命令行工具提取 RAR 文件（优先 bsdtar，回退 unar）"""
+    available_tools = _get_rar_tools()
+    if not available_tools:
+        return {'error': '未找到可用的解压工具（bsdtar 或 unar），无法处理 RAR 文件'}
     
+    temp_extract_dir = None
+    tmp_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix='.rar', delete=False) as tmp_file:
-            tmp_file.write(file_data)
-            tmp_file.flush()
-            os.fsync(tmp_file.fileno())
-            tmp_path = tmp_file.name
+        # 确保临时文件完整写入并关闭
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix='.rar')
+        os.write(tmp_fd, file_data)
+        os.fsync(tmp_fd)
+        os.close(tmp_fd)
         
-        try:
-            # 使用解压工具解压到临时目录
+        last_error = ''
+        for tool in available_tools:
             temp_extract_dir = tempfile.mkdtemp()
             try:
-                if tool == 'unar':
-                    cmd = ['unar', '-o', temp_extract_dir, '-f', '-q', tmp_path]
-                elif tool == 'bsdtar':
+                if tool == 'bsdtar':
                     cmd = ['bsdtar', '-xf', tmp_path, '-C', temp_extract_dir]
+                elif tool == 'unar':
+                    cmd = ['unar', '-o', temp_extract_dir, '-f', '-q', tmp_path]
+                else:
+                    continue
                 
                 result = subprocess.run(
                     cmd, capture_output=True, text=True, timeout=300
                 )
                 
-                if result.returncode != 0:
-                    error_detail = result.stderr.strip() or result.stdout.strip() or '未知错误'
-                    return {'error': f'RAR 解压失败 ({tool}, code={result.returncode}): {error_detail}'}
-                
-                # 收集解压后的所有文件
-                file_list = []
+                # 检查是否成功解压出了文件
+                extracted_files = []
                 for root, dirs, files in os.walk(temp_extract_dir):
                     for fname in files:
-                        full_path = os.path.join(root, fname)
-                        rel_path = os.path.relpath(full_path, temp_extract_dir).replace('\\', '/')
-                        file_list.append((full_path, rel_path))
+                        extracted_files.append(fname)
                 
-                if not file_list:
-                    return {'error': f'压缩文件为空或 {tool} 未能解压出任何文件'}
-                
-                # 获取第一层文件夹
-                first_folder = None
-                for _, rel_path in file_list:
-                    if '/' in rel_path:
-                        potential_folder = rel_path.split('/')[0]
-                        if potential_folder:
-                            first_folder = potential_folder
-                            break
-                
-                if not first_folder:
-                    first_folder = ''
-                    files_to_process = file_list
+                if extracted_files:
+                    break
                 else:
-                    prefix = first_folder + '/'
-                    files_to_process = [
-                        (fp, rp) for fp, rp in file_list
-                        if rp.startswith(prefix)
-                    ]
-                
-                total_files = len(files_to_process)
-                status_text.text(f"找到 {total_files} 个文件需要处理")
-                
-                copied_count = 0
-                skipped_count = 0
-                error_count = 0
-                
-                # 使用线程池处理
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = []
-                    for full_path, rel_path in files_to_process:
-                        with open(full_path, 'rb') as f:
-                            file_content = f.read()
-                        future = executor.submit(
-                            process_single_file,
-                            rel_path, output_dir, first_folder,
-                            file_content, skip_user_files, skip_patterns
-                        )
-                        futures.append(future)
-                    
-                    # 处理结果
-                    completed = 0
-                    for future in as_completed(futures):
-                        completed += 1
-                        progress = completed / total_files
-                        progress_bar.progress(progress)
-                        
-                        result = future.result()
-                        if result['status'] == 'copied':
-                            copied_count += 1
-                        elif result['status'] == 'skipped':
-                            skipped_count += 1
-                        else:
-                            error_count += 1
-                
-                return {
-                    'success': True,
-                    'copied': copied_count,
-                    'skipped': skipped_count,
-                    'errors': error_count,
-                    'output_dir': output_dir
-                }
-            finally:
-                # 清理临时解压目录
-                if os.path.exists(temp_extract_dir):
+                    error_detail = result.stderr.strip() or result.stdout.strip() or '无文件输出'
+                    last_error = f'{tool}: {error_detail}'
                     shutil.rmtree(temp_extract_dir, ignore_errors=True)
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+                    temp_extract_dir = None
+                    continue
+                    
+            except Exception as e:
+                last_error = f'{tool}: {str(e)}'
+                shutil.rmtree(temp_extract_dir, ignore_errors=True)
+                temp_extract_dir = None
+                continue
+        else:
+            return {'error': f'所有解压工具均失败: {last_error}'}
+        
+        # 收集解压后的所有文件
+        file_list = []
+        for root, dirs, files in os.walk(temp_extract_dir):
+            for fname in files:
+                full_path = os.path.join(root, fname)
+                rel_path = os.path.relpath(full_path, temp_extract_dir).replace('\\', '/')
+                file_list.append((full_path, rel_path))
+        
+        if not file_list:
+            return {'error': '压缩文件为空'}
+        
+        # 获取第一层文件夹
+        first_folder = None
+        for _, rel_path in file_list:
+            if '/' in rel_path:
+                potential_folder = rel_path.split('/')[0]
+                if potential_folder:
+                    first_folder = potential_folder
+                    break
+        
+        if not first_folder:
+            first_folder = ''
+            files_to_process = file_list
+        else:
+            prefix = first_folder + '/'
+            files_to_process = [
+                (fp, rp) for fp, rp in file_list
+                if rp.startswith(prefix)
+            ]
+        
+        total_files = len(files_to_process)
+        status_text.text(f"找到 {total_files} 个文件需要处理")
+        
+        copied_count = 0
+        skipped_count = 0
+        error_count = 0
+        
+        # 使用线程池处理
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for full_path, rel_path in files_to_process:
+                with open(full_path, 'rb') as f:
+                    file_content = f.read()
+                future = executor.submit(
+                    process_single_file,
+                    rel_path, output_dir, first_folder,
+                    file_content, skip_user_files, skip_patterns
+                )
+                futures.append(future)
+            
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                progress = completed / total_files
+                progress_bar.progress(progress)
+                
+                result = future.result()
+                if result['status'] == 'copied':
+                    copied_count += 1
+                elif result['status'] == 'skipped':
+                    skipped_count += 1
+                else:
+                    error_count += 1
+        
+        return {
+            'success': True,
+            'copied': copied_count,
+            'skipped': skipped_count,
+            'errors': error_count,
+            'output_dir': output_dir
+        }
     except FileNotFoundError:
-        return {'error': 'unar 工具未安装，无法处理 RAR 文件'}
+        return {'error': '解压工具未安装，无法处理 RAR 文件'}
     except Exception as e:
         return {'error': f'RAR 解压出错: {str(e)}'}
+    finally:
+        if temp_extract_dir and os.path.exists(temp_extract_dir):
+            shutil.rmtree(temp_extract_dir, ignore_errors=True)
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 def extract_7z(file_data, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns):
     """使用 py7zr 提取 7z 文件"""
