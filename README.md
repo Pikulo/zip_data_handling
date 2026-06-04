@@ -2,6 +2,10 @@
 
 一个基于 Streamlit 的网页版压缩文件提取工具，支持 ZIP、7z、RAR 格式，可直接在云端或本地运行。
 
+## 📸 应用截图
+
+![应用界面预览](docs/images/Snipaste_2026-06-04_18-50-50.png)
+
 ## ✨ 功能特点
 
 - **多格式支持**：支持 ZIP、7z、RAR 格式（含 RAR5）
@@ -105,7 +109,28 @@ py7zr>=0.20.0
 ├── requirements_streamlit.txt # Streamlit Cloud 专用依赖
 ├── packages.txt              # 系统依赖（云端部署）
 ├── README.md                 # 项目说明
-└── LICENSE                   # MIT 许可证
+├── LICENSE                   # MIT 许可证
+└── docs/
+    └── images/               # 项目截图资源
+        └── Snipaste_2026-06-04_18-50-50.png
+```
+
+## 💻 本地运行（支持 RAR 格式）
+
+如需处理 RAR 文件，请在本地运行：
+
+```bash
+# 安装 rarfile 依赖
+pip install rarfile
+
+# macOS
+brew install unrar
+
+# Ubuntu/Debian
+sudo apt install unrar
+
+# 运行应用
+streamlit run streamlit_app.py
 ```
 
 ## 🤝 贡献
