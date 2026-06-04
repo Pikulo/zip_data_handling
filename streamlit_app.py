@@ -1,8 +1,6 @@
 """
 压缩文件处理器 - 网页版
-支持 ZIP、7z 格式的文件提取
-
-注意：RAR 格式需要本地运行（需要安装 unrar 工具）
+支持 ZIP、7z、RAR 格式的文件提取
 """
 
 import os
@@ -25,6 +23,7 @@ st.set_page_config(
 SUPPORTED_FORMATS = {
     '.zip': 'ZIP文件',
     '.7z': '7z文件',
+    '.rar': 'RAR文件',
     '.tar': 'TAR文件',
     '.gz': 'GZIP文件',
     '.bz2': 'BZIP2文件',
@@ -146,6 +145,89 @@ def extract_zip(file_data, output_dir, max_workers, progress_bar, status_text, s
     except Exception as e:
         return {'error': str(e)}
 
+def extract_rar(file_data, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns):
+    """使用 rarfile 提取 RAR 文件"""
+    try:
+        import rarfile
+        
+        with tempfile.NamedTemporaryFile(suffix='.rar', delete=False) as tmp_file:
+            tmp_file.write(file_data)
+            tmp_path = tmp_file.name
+        
+        try:
+            with rarfile.RarFile(tmp_path, 'r') as archive:
+                file_list = [info for info in archive.infolist() if not info.is_dir()]
+                
+                if not file_list:
+                    return {'error': '压缩文件为空'}
+                
+                # 获取第一层文件夹
+                first_folder = None
+                for info in file_list:
+                    if '/' in info.filename:
+                        potential_folder = info.filename.split('/')[0]
+                        if potential_folder:
+                            first_folder = potential_folder
+                            break
+                
+                if not first_folder:
+                    first_folder = ''
+                    files_to_process = [info for info in file_list]
+                else:
+                    prefix = first_folder + '/'
+                    files_to_process = [
+                        info for info in file_list 
+                        if info.filename.startswith(prefix)
+                    ]
+                
+                total_files = len(files_to_process)
+                status_text.text(f"找到 {total_files} 个文件需要处理")
+                
+                copied_count = 0
+                skipped_count = 0
+                error_count = 0
+                
+                # 使用线程池处理
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = []
+                    for info in files_to_process:
+                        future = executor.submit(
+                            process_single_file,
+                            info.filename, output_dir, first_folder, 
+                            archive.read(info), skip_user_files, skip_patterns
+                        )
+                        futures.append(future)
+                    
+                    # 处理结果
+                    completed = 0
+                    for future in as_completed(futures):
+                        completed += 1
+                        progress = completed / total_files
+                        progress_bar.progress(progress)
+                        
+                        result = future.result()
+                        if result['status'] == 'copied':
+                            copied_count += 1
+                        elif result['status'] == 'skipped':
+                            skipped_count += 1
+                        else:
+                            error_count += 1
+                
+                return {
+                    'success': True,
+                    'copied': copied_count,
+                    'skipped': skipped_count,
+                    'errors': error_count,
+                    'output_dir': output_dir
+                }
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+    except ImportError:
+        return {'error': 'RAR 支持库未安装，请确保 rarfile 已安装且系统已配置 unrar 工具'}
+    except Exception as e:
+        return {'error': str(e)}
+
 def extract_7z(file_data, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns):
     """使用 py7zr 提取 7z 文件"""
     try:
@@ -246,12 +328,12 @@ def process_archive(archive_file, output_dir, max_workers, progress_bar, status_
         # 根据文件类型选择处理方式
         if is_zip:
             return extract_zip(file_data, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns)
+        elif is_rar:
+            return extract_rar(file_data, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns)
         elif is_7z:
             return extract_7z(file_data, output_dir, max_workers, progress_bar, status_text, skip_user_files, skip_patterns)
-        elif is_rar:
-            return {'error': 'RAR 格式暂不支持，请在本地运行此应用或使用 ZIP/7z 格式'}
         else:
-            return {'error': '无法识别的压缩文件格式，请上传 ZIP 或 7z 格式'}
+            return {'error': '无法识别的压缩文件格式，请上传 ZIP、RAR 或 7z 格式'}
         
     except Exception as e:
         return {'error': str(e)}
@@ -259,15 +341,12 @@ def process_archive(archive_file, output_dir, max_workers, progress_bar, status_
 def main():
     # 标题
     st.title("📦 压缩文件处理器")
-    st.markdown("支持 ZIP、7z 格式的文件提取")
+    st.markdown("支持 ZIP、7z、RAR 格式的文件提取")
     
-    # RAR 提示（使用 expander 避免遮挡）
+    # 格式说明
     with st.expander("ℹ️ 支持格式说明"):
         st.markdown("""
-        - **支持**: ZIP、7z 格式
-        - **不支持**: RAR 格式（云端部署限制）
-        
-        如需处理 RAR 文件，请在本地运行。
+        - **支持**: ZIP、7z、RAR 格式
         """)
     
     # 侧边栏 - 设置
@@ -294,14 +373,7 @@ def main():
             st.markdown(f"- {ext} {desc}")
         
         st.markdown("---")
-        st.markdown("""
-        **提示:** 如需处理 RAR 文件，请在本地运行：
-        ```bash
-        pip install rarfile
-        # macOS: brew install unrar
-        # Ubuntu: sudo apt install unrar
-        streamlit run streamlit_app.py
-        ```
+        st.markdown("""**已支持 RAR 格式** ✅
         """)
     
     # 主界面 - 文件上传
@@ -309,7 +381,7 @@ def main():
     uploaded_file = st.file_uploader(
         "拖拽或选择压缩文件",
         type=None,  # 允许所有文件，在应用内检测
-        help="支持 ZIP、7z 格式"
+        help="支持 ZIP、7z、RAR 格式"
     )
     
     if uploaded_file:
